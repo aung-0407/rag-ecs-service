@@ -469,30 +469,60 @@ class RAGChain:
         logger.info(f"Context length: {len(context)} characters")
         logger.info(f"Including {len(image_references)} image references")
         
-        # Create prompt with image awareness
-        system_message = """You are a helpful AI assistant that answers questions based on the provided context.
+        import re
+        is_japanese = bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', query))
+        logger.info(f"Detected language: {'Japanese' if is_japanese else 'English'}")
 
-CRITICAL LANGUAGE RULE:
-- If the user's question is in Japanese (日本語), you MUST answer in Japanese (日本語で答えてください)
-- If the user's question is in English, answer in English
-- Match the language of the question exactly
+        # Create language-specific prompts
+        if is_japanese:
+            system_message = """あなたは提供されたコンテキストに基づいて質問に答える親切なAIアシスタントです。
+
+重要: 必ず日本語で回答してください。絶対に英語を使わないでください。
+
+例:
+質問: 次期POS基盤とは何ですか？
+回答: 次期POS基盤は、専門店、飲食店、量販店など様々な業態のPOSシステムで共通して利用する機能を備えた基盤システムです。（ソース1より）
+
+指示:
+1. 提供されたソースの情報のみを使用して質問に答えてください
+2. ソースに十分な情報が含まれていない場合は、明確に述べてください
+3. ソース番号を言及してソースを引用してください（例：「ソース1によると...」「ソース2には...」）
+4. コンテキストで画像が言及されている場合は、関連する場合に参照してください
+5. 簡潔でありながら包括的に答えてください
+6. 不確かな場合は、不確実性を認めてください
+
+重要: 提供されたソースからの情報のみを使用してください。外部の知識を追加しないでください。"""
+
+            user_message = f"""ドキュメントからのコンテキスト:
+{context}
+
+質問: {query}
+
+上記のコンテキストに基づいて、日本語で詳細な回答を提供してください。必ず日本語で答えてください。"""
+
+        else:
+            system_message = """You are a helpful AI assistant that answers questions based on the provided context.
+
+Example:
+Question: What is the next-generation POS platform?
+Answer: The next-generation POS platform is a base system with features commonly used by POS systems for various business types including specialty stores, restaurants, and mass retailers. (Source 1)
 
 Instructions:
 1. Answer the question using ONLY the information from the provided sources
 2. If the sources don't contain enough information, say so clearly
-3. Cite your sources by mentioning the source number (e.g., "According to Source 1..." or "ソース1によると...")
+3. Cite your sources by mentioning the source number (e.g., "According to Source 1..." "Source 2 states...")
 4. If images are mentioned in the context, reference them when relevant
 5. Be concise but comprehensive
 6. If you're not sure, acknowledge the uncertainty
 
 Remember: Only use information from the provided sources. Do not add external knowledge."""
 
-        user_message = f"""Context from documents:
+            user_message = f"""Context from documents:
 {context}
 
 Question: {query}
 
-Please provide a detailed answer based on the context above."""
+Please provide a detailed answer based on the context above in English."""
 
         llm = ChatOpenAI(
             model=model_to_use,
