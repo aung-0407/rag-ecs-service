@@ -1,0 +1,508 @@
+import os
+import json
+import logging
+from typing import List, Dict, Any, Optional
+import boto3
+from opensearchpy import OpenSearch, RequestsHttpConnection, AWSV4SignerAuth
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage
+
+logger = logging.getLogger(__name__)
+
+
+class RAGChain:
+    """RAG Chain with image support and auto-refreshing AWS credentials"""
+    
+    # Class-level cache for API key
+    _api_key_cache = None
+    
+    def __init__(self):
+        """Initialize RAG chain with OpenSearch and OpenAI"""
+        # Get configuration
+        self.opensearch_endpoint = os.environ.get("OPENSEARCH_ENDPOINT")
+        self.opensearch_index = os.environ.get("OPENSEARCH_INDEX", "documents")
+        self.aws_region = os.environ.get("AWS_REGION", "ap-northeast-1")
+        self.llm_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+        self.secret_name = os.environ.get("SECRET_NAME", "rag/openai/api_key")
+        
+        if not self.opensearch_endpoint:
+            raise ValueError("OPENSEARCH_ENDPOINT environment variable is required")
+        
+        logger.info(f"Initializing RAG chain with OpenSearch: {self.opensearch_endpoint}")
+        
+        # Get OpenAI API key (with caching)
+        self.openai_api_key = self._get_cached_openai_api_key()
+        
+        # Initialize OpenSearch client with auto-refreshing credentials
+        self.opensearch_client = self._init_opensearch()
+        
+        # Initialize S3 client for presigned URLs
+        self.s3_client = boto3.client('s3', region_name=self.aws_region)
+        
+        # Initialize OpenAI embeddings
+        self.embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            openai_api_key=self.openai_api_key
+        )
+        
+        # Initialize default LLM
+        self.llm = ChatOpenAI(
+            model=self.llm_model,
+            temperature=0.7,
+            openai_api_key=self.openai_api_key
+        )
+        
+        logger.info("RAG chain initialized successfully")
+    
+    @classmethod
+    def _get_cached_openai_api_key(cls) -> str:
+        """Retrieve OpenAI API key with caching"""
+        if cls._api_key_cache:
+            logger.info("Using cached OpenAI API key")
+            return cls._api_key_cache
+        
+        # Try environment variable first
+        api_key = os.environ.get('OPENAI_API_KEY')
+        if api_key:
+            logger.info("Using OpenAI API key from environment variable")
+            cls._api_key_cache = api_key
+            return api_key
+        
+        # Fall back to Secrets Manager
+        try:
+            logger.info("Fetching OpenAI API key from Secrets Manager...")
+            secret_name = os.environ.get("SECRET_NAME", "rag/openai/api_key")
+            region_name = os.environ.get("AWS_REGION", "ap-northeast-1")
+            
+            client = boto3.client('secretsmanager', region_name=region_name)
+            response = client.get_secret_value(SecretId=secret_name)
+            
+            secret = json.loads(response['SecretString'])
+            api_key = secret.get('RAG_OPENAI_API_KEY')
+            
+            if not api_key:
+                raise ValueError("RAG_OPENAI_API_KEY not found in secret")
+            
+            cls._api_key_cache = api_key
+            logger.info("Successfully retrieved and cached OpenAI API key")
+            return api_key
+            
+        except Exception as e:
+            logger.error(f"Failed to retrieve OpenAI API key: {str(e)}")
+            raise
+    
+    def _init_opensearch(self) -> OpenSearch:
+        """
+        Initialize OpenSearch with auto-refreshing credentials
+        """
+        try:
+            session = boto3.Session()
+            credentials = session.get_credentials()
+            
+            auth = AWSV4SignerAuth(credentials, self.aws_region, 'es')
+            
+            client = OpenSearch(
+                hosts=[{'host': self.opensearch_endpoint, 'port': 443}],
+                http_auth=auth,
+                use_ssl=True,
+                verify_certs=True,
+                connection_class=RequestsHttpConnection,
+                timeout=30,
+                max_retries=3,
+                retry_on_timeout=True,
+                pool_connections=10,
+                pool_maxsize=10
+            )
+            
+            info = client.info()
+            logger.info(f"Connected to OpenSearch: {info['version']['number']}")
+            
+            return client
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenSearch: {str(e)}")
+            raise
+    
+    def _generate_presigned_url(self, bucket: str, key: str, expiration: int = 3600) -> str:
+        """
+        Generate presigned URL for S3 object
+        
+        Args:
+            bucket: S3 bucket name
+            key: S3 object key
+            expiration: URL expiration time in seconds (default 1 hour)
+        
+        Returns:
+            Presigned URL string
+        """
+        try:
+            url = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket, 'Key': key},
+                ExpiresIn=expiration
+            )
+            return url
+        except Exception as e:
+            logger.error(f"Failed to generate presigned URL for s3://{bucket}/{key}: {e}")
+            return None
+    
+    def test_opensearch_connection(self) -> bool:
+        """Test OpenSearch connection"""
+        try:
+            self.opensearch_client.info()
+            return True
+        except Exception as e:
+            logger.error(f"OpenSearch connection test failed: {e}")
+            return False
+    
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        search_type: str = "hybrid"
+    ) -> List[Dict[str, Any]]:
+        """Search documents in OpenSearch"""
+        try:
+            logger.info(f"Executing {search_type} search for: '{query}' (top_k={top_k})")
+            
+            if search_type == "text":
+                return self._text_search(query, top_k)
+            elif search_type == "vector":
+                return self._vector_search(query, top_k)
+            else:  # hybrid
+                return self._hybrid_search(query, top_k)
+                
+        except Exception as e:
+            logger.error(f"Search failed: {str(e)}")
+            raise
+    
+    def _text_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
+        """Full-text search using BM25"""
+        search_body = {
+            "size": top_k,
+            "query": {
+                "multi_match": {
+                    "query": query,
+                    "fields": [
+                        "chunk_text^2",
+                        "section_path",
+                        "filename",
+                        "content"
+                    ],
+                    "type": "best_fields"
+                }
+            },
+            "sort": [
+                {"_score": {"order": "desc"}},
+                {"timestamp": {"order": "desc"}}
+            ]
+        }
+        
+        response = self.opensearch_client.search(
+            index=self.opensearch_index,
+            body=search_body
+        )
+        
+        total_hits = response['hits']['total']['value']
+        logger.info(f"Text search found {total_hits} results")
+        
+        return self._format_search_results(response)
+    
+    def _vector_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
+        """Semantic search using vector embeddings"""
+        query_vector = self.embeddings.embed_query(query)
+        logger.info(f"Generated query embedding (dimension: {len(query_vector)})")
+        
+        search_body = {
+            "size": top_k,
+            "query": {
+                "knn": {
+                    "embedding": {
+                        "vector": query_vector,
+                        "k": top_k
+                    }
+                }
+            },
+            "sort": [
+                {"_score": {"order": "desc"}},
+                {"timestamp": {"order": "desc"}}
+            ]
+        }
+        
+        response = self.opensearch_client.search(
+            index=self.opensearch_index,
+            body=search_body
+        )
+        
+        total_hits = response['hits']['total']['value']
+        logger.info(f"Vector search found {total_hits} results")
+        
+        return self._format_search_results(response)
+    
+    def _hybrid_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
+        """Hybrid search combining text and vector search"""
+        query_vector = self.embeddings.embed_query(query)
+        logger.info(f"Generated query embedding (dimension: {len(query_vector)})")
+        
+        search_body = {
+            "size": top_k,
+            "query": {
+                "bool": {
+                    "should": [
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": [
+                                    "chunk_text^2",
+                                    "section_path",
+                                    "filename",
+                                    "content"
+                                ],
+                                "type": "best_fields",
+                                "boost": 1.0
+                            }
+                        },
+                        {
+                            "knn": {
+                                "embedding": {
+                                    "vector": query_vector,
+                                    "k": top_k,
+                                    "boost": 1.0
+                                }
+                            }
+                        }
+                    ],
+                    "minimum_should_match": 1
+                }
+            },
+            "sort": [
+                {"_score": {"order": "desc"}},
+                {"timestamp": {"order": "desc"}}
+            ]
+        }
+        
+        response = self.opensearch_client.search(
+            index=self.opensearch_index,
+            body=search_body
+        )
+        
+        total_hits = response['hits']['total']['value']
+        max_score = response['hits']['max_score'] if response['hits']['hits'] else 0
+        logger.info(f"Hybrid search found {total_hits} results (max_score: {max_score})")
+        
+        if response['hits']['hits']:
+            top_score = response['hits']['hits'][0]['_score']
+            top_doc = response['hits']['hits'][0]['_source'].get('filename', 'Unknown')
+            logger.info(f"Top result: {top_doc} (score: {top_score})")
+        
+        return self._format_search_results(response)
+    
+    def _format_search_results(self, response: Dict) -> List[Dict[str, Any]]:
+        """
+        Format OpenSearch results with comprehensive metadata including images
+        """
+        documents = []
+        
+        for hit in response['hits']['hits']:
+            source = hit['_source']
+            
+            # Extract basic metadata
+            doc = {
+                "content": source.get('chunk_text', ''),
+                "metadata": {
+                    "filename": source.get('filename', 'Unknown'),
+                    "document_id": source.get('document_id', 'Unknown'),
+                    "section_title": source.get('section_title', ''),
+                    "section_path": source.get('section_path', ''),
+                    "file_type": source.get('file_type', ''),
+                    "bucket": source.get('bucket', ''),
+                    "key": source.get('key', ''),
+                    "chunk_index": source.get('chunk_index', 0),
+                    "total_chunks": source.get('total_chunks', 0),
+                    "timestamp": source.get('timestamp', '')
+                },
+                "score": hit['_score']
+            }
+            
+            # Process image references with presigned URLs
+            if 'image_references' in source and source['image_references']:
+                images_with_urls = []
+                
+                for img in source['image_references']:
+                    image_data = {
+                        'alt_text': img.get('alt_text', ''),
+                        'filename': img.get('filename', ''),
+                        'section': img.get('section', ''),
+                        'section_path': img.get('section_path', ''),
+                        'context': img.get('context', ''),
+                        'position': img.get('position', 0)
+                    }
+                    
+                    # Generate presigned URL for the image
+                    bucket = img.get('s3_bucket')
+                    key = img.get('s3_key')
+                    
+                    if bucket and key:
+                        presigned_url = self._generate_presigned_url(bucket, key)
+                        if presigned_url:
+                            image_data['url'] = presigned_url
+                            image_data['s3_bucket'] = bucket
+                            image_data['s3_key'] = key
+                            logger.info(f"Generated presigned URL for image: {img.get('filename')}")
+                    
+                    images_with_urls.append(image_data)
+                
+                doc["metadata"]["images"] = images_with_urls
+                doc["metadata"]["image_count"] = len(images_with_urls)
+            
+            # Include additional metadata if present
+            if 'total_images' in source:
+                doc["metadata"]["total_images"] = source['total_images']
+            if 'total_sections' in source:
+                doc["metadata"]["total_sections"] = source['total_sections']
+            if 'total_slides' in source:
+                doc["metadata"]["total_slides"] = source['total_slides']
+            
+            documents.append(doc)
+        
+        return documents
+    
+    def query(
+        self,
+        query: str,
+        top_k: int = 5,
+        search_type: str = "hybrid",
+        llm_model: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Execute RAG query: search + generate answer"""
+        try:
+            logger.info(f"Executing RAG query: {query}")
+            
+            documents = self.search(query, top_k, search_type)
+            
+            if not documents:
+                logger.warning("No documents found for query")
+                return {
+                    "answer": "I couldn't find any relevant information in the documents to answer your question.",
+                    "sources": []
+                }
+            
+            logger.info(f"Retrieved {len(documents)} documents")
+            
+            # Log if images were found
+            total_images = sum(
+                len(doc.get('metadata', {}).get('images', [])) 
+                for doc in documents
+            )
+            if total_images > 0:
+                logger.info(f"Found {total_images} images in retrieved documents")
+            
+            answer = self._generate_answer(query, documents, llm_model)
+            
+            return {
+                "answer": answer,
+                "sources": documents
+            }
+            
+        except Exception as e:
+            logger.error(f"RAG query failed: {str(e)}")
+            raise
+    
+    def _generate_answer(
+        self, 
+        query: str, 
+        documents: List[Dict[str, Any]],
+        llm_model: Optional[str] = None
+    ) -> str:
+        """Generate answer using LLM with retrieved context and image information"""
+        
+        model_to_use = llm_model or self.llm_model
+        logger.info(f"Generating answer with model: {model_to_use}")
+        
+        context_parts = []
+        image_references = []
+        
+        for i, doc in enumerate(documents, 1):
+            metadata = doc.get('metadata', {})
+            filename = metadata.get('filename', 'Unknown')
+            section_path = metadata.get('section_path', '')
+            section_title = metadata.get('section_title', '')
+            content = doc['content']
+            score = doc.get('score', 0)
+            
+            # Build context with section information
+            if section_path:
+                context_parts.append(
+                    f"[Source {i}: {filename} - {section_path}] (Relevance: {score:.2f})\n{content}\n"
+                )
+            elif section_title:
+                context_parts.append(
+                    f"[Source {i}: {filename} - {section_title}] (Relevance: {score:.2f})\n{content}\n"
+                )
+            else:
+                context_parts.append(
+                    f"[Source {i}: {filename}] (Relevance: {score:.2f})\n{content}\n"
+                )
+            
+            # Add image information if present
+            images = metadata.get('images', [])
+            if images:
+                context_parts.append(f"\n📸 Related Images in Source {i}:\n")
+                for j, img in enumerate(images, 1):
+                    img_info = f"  Image {j}: {img.get('filename', 'Unknown')}"
+                    if img.get('alt_text'):
+                        img_info += f" - {img['alt_text']}"
+                    if img.get('section_path'):
+                        img_info += f" (in section: {img['section_path']})"
+                    context_parts.append(img_info + "\n")
+                    
+                    # Collect image references for response
+                    image_references.append({
+                        'source': i,
+                        'filename': img.get('filename', 'Unknown'),
+                        'url': img.get('url'),
+                        'alt_text': img.get('alt_text', ''),
+                        'section': img.get('section_path', img.get('section', ''))
+                    })
+        
+        context = "\n".join(context_parts)
+        logger.info(f"Context length: {len(context)} characters")
+        logger.info(f"Including {len(image_references)} image references")
+        
+        # Create prompt with image awareness
+        system_message = """You are a helpful AI assistant that answers questions based on the provided context.
+
+Instructions:
+1. Answer the question using ONLY the information from the provided sources
+2. If the sources don't contain enough information, say so clearly
+3. Cite your sources by mentioning the source number (e.g., "According to Source 1...")
+4. If images are mentioned in the context, reference them when relevant (e.g., "See Image 1 in Source 2")
+5. Be concise but comprehensive
+6. If you're not sure, acknowledge the uncertainty
+7. If the question is in Japanese, answer in Japanese
+8. If the question is in English, answer in English
+
+Remember: Only use information from the provided sources. Do not add external knowledge."""
+
+        user_message = f"""Context from documents:
+{context}
+
+Question: {query}
+
+Please provide a detailed answer based on the context above."""
+
+        llm = ChatOpenAI(
+            model=model_to_use,
+            temperature=0.7,
+            openai_api_key=self.openai_api_key
+        )
+        
+        messages = [
+            SystemMessage(content=system_message),
+            HumanMessage(content=user_message)
+        ]
+        
+        response = llm.invoke(messages)
+        logger.info(f"Generated answer ({len(response.content)} characters)")
+        
+        return response.content
