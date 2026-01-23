@@ -17,7 +17,9 @@ if [ ! -f .env ]; then
 fi
 
 echo "Loading configuration from .env file..."
-export $(grep -v '^#' .env | xargs)
+set -a
+source <(sed -e 's/\r$//' -e '/^#/d' -e '/^$/d' .env)
+set +a
 
 # Check if RAG_API_URL is set
 if [ -z "$RAG_API_URL" ]; then
