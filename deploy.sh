@@ -18,7 +18,9 @@ if [ ! -f .env ]; then
 fi
 
 echo "Loading configuration from .env file..."
-export $(grep -v '^#' .env | xargs)
+set -a
+source <(sed -e 's/\r$//' -e '/^#/d' -e '/^$/d' .env)
+set +a
 
 # Service configuration
 SERVICE_NAME="${RAG_SERVICE_NAME}"
