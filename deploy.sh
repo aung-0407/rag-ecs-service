@@ -266,7 +266,7 @@ if [ -n "$TASK_ARN" ] && [ "$TASK_ARN" != "None" ]; then
         echo ""
         echo "Test commands:"
         echo "  Health check: curl http://${PUBLIC_IP}:8000/health"
-        echo "  List models: curl http://${PUBLIC_IP}:8000/api/models"
+        echo "  List models: curl http://${PUBLIC_IP}:8000/v1/models"
         echo ""
         echo "========================================="
         echo "⚠️  IMPORTANT: Update your .env file!"
