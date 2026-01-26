@@ -90,7 +90,7 @@ async def startup():
         raise
 
 
-@compat_app.get("/v1/models", response_model=ModelList)
+@compat_app.get("/api/models", response_model=ModelList)
 async def list_models():
     """
     List available models (OpenAI-compatible)
@@ -122,7 +122,7 @@ async def list_models():
     )
 
 
-@compat_app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@compat_app.post("/api/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
     """
     Chat completions endpoint (OpenAI-compatible)
@@ -205,8 +205,8 @@ async def root():
         "message": "OpenAI-Compatible RAG API",
         "version": "1.0.0",
         "endpoints": {
-            "models": "/v1/models",
-            "chat": "/v1/chat/completions"
+            "models": "/api/models",
+            "chat": "/api/chat/completions"
         }
     }
 

@@ -122,7 +122,7 @@ cat > task-definition.json <<EOF
       "environment": [
         {
           "name": "OPENAI_API_BASE_URL",
-          "value": "${RAG_API_URL}/v1"
+          "value": "${RAG_API_URL}"
         },
         {
           "name": "OPENAI_API_KEY",
