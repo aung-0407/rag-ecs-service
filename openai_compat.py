@@ -117,6 +117,16 @@ async def list_models():
                 id="gpt-3.5-turbo",
                 created=int(time.time()),
                 owned_by="openai"
+            ),
+            Model(
+                id="gemini",
+                created=int(time.time()),
+                owned_by="google"
+            ),
+            Model(
+                id="claude",
+                created=int(time.time()),
+                owned_by="anthropic"
             )
         ]
     )
