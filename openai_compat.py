@@ -107,33 +107,18 @@ async def list_models():
             ),
             # Anthropic models
             Model(
-                id="claude-3-5-sonnet-20241022",
-                created=int(time.time()),
-                owned_by="anthropic"
-            ),
-            Model(
-                id="claude-3-opus-20240229",
-                created=int(time.time()),
-                owned_by="anthropic"
-            ),
-            Model(
-                id="claude-3-sonnet-20240229",
+                id="claude-3-haiku-20240307",
                 created=int(time.time()),
                 owned_by="anthropic"
             ),
             # Google models
             Model(
-                id="gemini-1.5-pro",
+                id="gemini-2.5-pro",
                 created=int(time.time()),
                 owned_by="google"
             ),
             Model(
-                id="gemini-1.5-flash",
-                created=int(time.time()),
-                owned_by="google"
-            ),
-            Model(
-                id="gemini-pro",
+                id="gemini-2.5-flash",
                 created=int(time.time()),
                 owned_by="google"
             )
