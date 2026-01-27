@@ -179,7 +179,6 @@ cat > task-definition.json <<EOF
           "name": "LLM_MODEL_GOOGLE",
           "value": "${LLM_MODEL_GOOGLE}"
         }
-        }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
