@@ -162,6 +162,23 @@ cat > task-definition.json <<EOF
         {
           "name": "SECRET_NAME",
           "value": "${SECRET_NAME}"
+        },
+        {
+          "name": "SECRET_NAME_ANTHROPIC",
+          "value": "${SECRET_NAME_ANTHROPIC}"
+        },
+        {
+          "name": "LLM_MODEL_ANTHROPIC",
+          "value": "${LLM_MODEL_ANTHROPIC}"
+        },
+        {
+          "name": "SECRET_NAME_GOOGLE",
+          "value": "${SECRET_NAME_GOOGLE}"
+        },
+        {
+          "name": "LLM_MODEL_GOOGLE",
+          "value": "${LLM_MODEL_GOOGLE}"
+        }
         }
       ],
       "logConfiguration": {
