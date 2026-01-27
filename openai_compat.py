@@ -82,11 +82,11 @@ async def startup():
     """Initialize RAG chain"""
     global rag_chain_instance
     try:
-        logger.info("Initializing RAG chain for OpenAI compatibility layer...")
+        print("Initializing RAG chain for OpenAI compatibility layer...")
         rag_chain_instance = RAGChain()
-        logger.info("RAG chain initialized")
+        print("RAG chain initialized")
     except Exception as e:
-        logger.error(f"Failed to initialize RAG chain: {e}")
+        print(f"Failed to initialize RAG chain: {e}")
         raise
 
 
@@ -140,8 +140,8 @@ async def chat_completions(request: ChatCompletionRequest):
         
         query = user_messages[-1].content 
         
-        logger.info(f"OpenAI-compat endpoint received query: {query}")
-        logger.info(f"[{request_id}] REQUEST |Using Model: {request.model} | Query: {query}")
+        print(f"OpenAI-compat endpoint received query: {query}")
+        print(f"[{request_id}] REQUEST |Using Model: {request.model} | Query: {query}")
         
         start_time = time.time()
         # Execute RAG query with specified model (works with any provider)
@@ -191,15 +191,15 @@ async def chat_completions(request: ChatCompletionRequest):
         
         
         source_files = [s.get("metadata", {}).get("filename", "Unknown") for s in sources[:3]]
-        logger.info(
+        print(
             f"[{request_id}]  RESPONSE | Duration: {duration:.2f}s | "
             f"Sources: {len(sources)} | Files: {', '.join(source_files)}"
         )
-        logger.info(f"[{request_id}]  ANSWER: {full_answer}")
+        print(f"[{request_id}]  ANSWER: {full_answer}")
         return response
         
     except Exception as e:
-        logger.error(f"[{request_id}]  ERROR: {str(e)}")
+        print(f"[{request_id}]  ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -237,7 +237,7 @@ async def health_check():
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
+        print(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=str(e))
 
 
