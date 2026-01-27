@@ -29,8 +29,8 @@ class RAGChain:
         
         # Default models for each provider
         self.llm_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        self.llm_model_anthropic = os.environ.get("LLM_MODEL_ANTHROPIC", "claude-3-5-sonnet-20241022")
-        self.llm_model_google = os.environ.get("LLM_MODEL_GOOGLE", "gemini-1.5-pro")
+        self.llm_model_anthropic = os.environ.get("LLM_MODEL_ANTHROPIC", "claude-3-haiku-20240307")
+        self.llm_model_google = os.environ.get("LLM_MODEL_GOOGLE", "gemini-2.5-pro")
         
         self.secret_name = os.environ.get("SECRET_NAME", "rag/openai/api_key")
         
