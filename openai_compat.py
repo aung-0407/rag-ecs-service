@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 compat_app = FastAPI(
     title="OpenAI-Compatible RAG API",
-    description="OpenAI-compatible interface for RAG queries",
+    description="OpenAI-compatible interface for RAG queries with multi-LLM support",
     version="1.0.0"
 )
 
@@ -35,7 +35,7 @@ class Model(BaseModel):
     id: str
     object: Literal["model"] = "model"
     created: int
-    owned_by: str = "openai"
+    owned_by: str
 
 
 class ModelList(BaseModel):
@@ -92,12 +92,9 @@ async def startup():
 
 @compat_app.get("/v1/models", response_model=ModelList)
 async def list_models():
-    """
-    List available models (OpenAI-compatible)
-    Required by Open WebUI to discover available models
-    """
     return ModelList(
         data=[
+            # OpenAI models
             Model(
                 id="gpt-4o-mini",
                 created=int(time.time()),
@@ -108,15 +105,37 @@ async def list_models():
                 created=int(time.time()),
                 owned_by="openai"
             ),
+            # Anthropic models
             Model(
-                id="gpt-4-turbo",
+                id="claude-3-5-sonnet-20241022",
                 created=int(time.time()),
-                owned_by="openai"
+                owned_by="anthropic"
             ),
             Model(
-                id="gpt-3.5-turbo",
+                id="claude-3-opus-20240229",
                 created=int(time.time()),
-                owned_by="openai"
+                owned_by="anthropic"
+            ),
+            Model(
+                id="claude-3-sonnet-20240229",
+                created=int(time.time()),
+                owned_by="anthropic"
+            ),
+            # Google models
+            Model(
+                id="gemini-1.5-pro",
+                created=int(time.time()),
+                owned_by="google"
+            ),
+            Model(
+                id="gemini-1.5-flash",
+                created=int(time.time()),
+                owned_by="google"
+            ),
+            Model(
+                id="gemini-pro",
+                created=int(time.time()),
+                owned_by="google"
             )
         ]
     )
@@ -124,14 +143,6 @@ async def list_models():
 
 @compat_app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
-    """
-    Chat completions endpoint (OpenAI-compatible)
-    
-    This endpoint:
-    1. Extracts the user's question from messages
-    2. Queries the RAG system with specified model
-    3. Returns response in OpenAI format
-    """
     try:
         if not rag_chain_instance:
             raise HTTPException(status_code=503, detail="RAG system not initialized")
@@ -146,12 +157,12 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"OpenAI-compat endpoint received query: {query}")
         logger.info(f"Using model: {request.model}")
         
-        # Execute RAG query with specified model
+        # Execute RAG query with specified model (works with any provider)
         result = rag_chain_instance.query(
             query=query,
             top_k=5,
             search_type="hybrid",
-            llm_model=request.model 
+            llm_model=request.model  
         )
         
         answer = result["answer"]
@@ -202,8 +213,9 @@ async def chat_completions(request: ChatCompletionRequest):
 async def root():
     """Root endpoint"""
     return {
-        "message": "OpenAI-Compatible RAG API",
+        "message": "OpenAI-Compatible RAG API with Multi-LLM Support",
         "version": "1.0.0",
+        "supported_providers": ["OpenAI", "Anthropic", "Google"],
         "endpoints": {
             "models": "/v1/models",
             "chat": "/v1/chat/completions"
@@ -217,11 +229,17 @@ async def health_check():
     try:
         opensearch_ok = rag_chain_instance.test_opensearch_connection() if rag_chain_instance else False
         openai_ok = bool(rag_chain_instance.openai_api_key) if rag_chain_instance else False
+        anthropic_ok = bool(rag_chain_instance.anthropic_api_key) if rag_chain_instance else False
+        google_ok = bool(rag_chain_instance.google_api_key) if rag_chain_instance else False
         
         return {
-            "status": "healthy" if (opensearch_ok and openai_ok) else "degraded",
+            "status": "healthy" if opensearch_ok else "degraded",
             "opensearch_connected": opensearch_ok,
-            "openai_configured": openai_ok,
+            "providers": {
+                "openai_configured": openai_ok,
+                "anthropic_configured": anthropic_ok,
+                "google_configured": google_ok
+            },
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:

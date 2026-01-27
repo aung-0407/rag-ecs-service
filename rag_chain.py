@@ -5,24 +5,33 @@ from typing import List, Dict, Any, Optional
 import boto3
 from opensearchpy import OpenSearch, RequestsHttpConnection, AWSV4SignerAuth
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_anthropic import ChatAnthropic
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.schema import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
 
 class RAGChain:
-    """RAG Chain with image support and auto-refreshing AWS credentials"""
+    """RAG Chain with multi-LLM support (OpenAI, Anthropic, Google)"""
     
-    # Class-level cache for API key
-    _api_key_cache = None
+    # Separate cache for each provider
+    _openai_key_cache = None
+    _anthropic_key_cache = None
+    _google_key_cache = None
     
     def __init__(self):
-        """Initialize RAG chain with OpenSearch and OpenAI"""
+        """Initialize RAG chain with OpenSearch and multiple LLM providers"""
         # Get configuration
         self.opensearch_endpoint = os.environ.get("OPENSEARCH_ENDPOINT")
         self.opensearch_index = os.environ.get("OPENSEARCH_INDEX", "documents")
         self.aws_region = os.environ.get("AWS_REGION", "ap-northeast-1")
+        
+        # Default models for each provider
         self.llm_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+        self.llm_model_anthropic = os.environ.get("LLM_MODEL_ANTHROPIC", "claude-3-5-sonnet-20241022")
+        self.llm_model_google = os.environ.get("LLM_MODEL_GOOGLE", "gemini-1.5-pro")
+        
         self.secret_name = os.environ.get("SECRET_NAME", "rag/openai/api_key")
         
         if not self.opensearch_endpoint:
@@ -30,8 +39,10 @@ class RAGChain:
         
         logger.info(f"Initializing RAG chain with OpenSearch: {self.opensearch_endpoint}")
         
-        # Get OpenAI API key (with caching)
+        # Get API keys (with caching)
         self.openai_api_key = self._get_cached_openai_api_key()
+        self.anthropic_api_key = self._get_cached_anthropic_api_key()
+        self.google_api_key = self._get_cached_google_api_key()
         
         # Initialize OpenSearch client with auto-refreshing credentials
         self.opensearch_client = self._init_opensearch()
@@ -45,27 +56,39 @@ class RAGChain:
             openai_api_key=self.openai_api_key
         )
         
-        # Initialize default LLM
+        # Initialize LLMs for each provider
         self.llm = ChatOpenAI(
             model=self.llm_model,
             temperature=0.7,
             openai_api_key=self.openai_api_key
         )
         
-        logger.info("RAG chain initialized successfully")
+        self.anthropic_llm = ChatAnthropic(
+            model=self.llm_model_anthropic,
+            temperature=0.7,
+            anthropic_api_key=self.anthropic_api_key
+        )
+        
+        self.google_llm = ChatGoogleGenerativeAI(
+            model=self.llm_model_google,
+            temperature=0.7,
+            google_api_key=self.google_api_key
+        )
+        
+        logger.info("RAG chain initialized successfully with OpenAI, Anthropic, and Google support")
     
     @classmethod
     def _get_cached_openai_api_key(cls) -> str:
         """Retrieve OpenAI API key with caching"""
-        if cls._api_key_cache:
+        if cls._openai_key_cache:
             logger.info("Using cached OpenAI API key")
-            return cls._api_key_cache
+            return cls._openai_key_cache
         
         # Try environment variable first
         api_key = os.environ.get('OPENAI_API_KEY')
         if api_key:
             logger.info("Using OpenAI API key from environment variable")
-            cls._api_key_cache = api_key
+            cls._openai_key_cache = api_key
             return api_key
         
         # Fall back to Secrets Manager
@@ -83,12 +106,86 @@ class RAGChain:
             if not api_key:
                 raise ValueError("RAG_OPENAI_API_KEY not found in secret")
             
-            cls._api_key_cache = api_key
+            cls._openai_key_cache = api_key
             logger.info("Successfully retrieved and cached OpenAI API key")
             return api_key
             
         except Exception as e:
             logger.error(f"Failed to retrieve OpenAI API key: {str(e)}")
+            raise
+    
+    @classmethod
+    def _get_cached_anthropic_api_key(cls) -> str:
+        """Retrieve Anthropic API key with caching"""
+        if cls._anthropic_key_cache:
+            logger.info("Using cached Anthropic API key")
+            return cls._anthropic_key_cache
+        
+        # Try environment variable first
+        api_key = os.environ.get('ANTHROPIC_API_KEY')
+        if api_key:
+            logger.info("Using Anthropic API key from environment variable")
+            cls._anthropic_key_cache = api_key
+            return api_key
+        
+        # Fall back to Secrets Manager
+        try:
+            logger.info("Fetching Anthropic API key from Secrets Manager...")
+            secret_name = os.environ.get("SECRET_NAME_ANTHROPIC", "rag/anthropic/api_key")
+            region_name = os.environ.get("AWS_REGION", "ap-northeast-1")
+            
+            client = boto3.client('secretsmanager', region_name=region_name)
+            response = client.get_secret_value(SecretId=secret_name)
+            
+            secret = json.loads(response['SecretString'])
+            api_key = secret.get('RAG_ANTHROPIC_API_KEY')
+            
+            if not api_key:
+                raise ValueError("RAG_ANTHROPIC_API_KEY not found in secret")
+            
+            cls._anthropic_key_cache = api_key
+            logger.info("Successfully retrieved and cached Anthropic API key")
+            return api_key
+            
+        except Exception as e:
+            logger.error(f"Failed to retrieve Anthropic API key: {str(e)}")
+            raise
+    
+    @classmethod
+    def _get_cached_google_api_key(cls) -> str:
+        """Retrieve Google API key with caching"""
+        if cls._google_key_cache:
+            logger.info("Using cached Google API key")
+            return cls._google_key_cache
+        
+        # Try environment variable first
+        api_key = os.environ.get('GOOGLE_API_KEY')
+        if api_key:
+            logger.info("Using Google API key from environment variable")
+            cls._google_key_cache = api_key
+            return api_key
+        
+        # Fall back to Secrets Manager
+        try:
+            logger.info("Fetching Google API key from Secrets Manager...")
+            secret_name = os.environ.get("SECRET_NAME_GOOGLE", "rag/google/api_key")
+            region_name = os.environ.get("AWS_REGION", "ap-northeast-1")
+            
+            client = boto3.client('secretsmanager', region_name=region_name)
+            response = client.get_secret_value(SecretId=secret_name)
+            
+            secret = json.loads(response['SecretString'])
+            api_key = secret.get('RAG_GOOGLE_API_KEY')
+            
+            if not api_key:
+                raise ValueError("RAG_GOOGLE_API_KEY not found in secret")
+            
+            cls._google_key_cache = api_key
+            logger.info("Successfully retrieved and cached Google API key")
+            return api_key
+            
+        except Exception as e:
+            logger.error(f"Failed to retrieve Google API key: {str(e)}")
             raise
     
     def _init_opensearch(self) -> OpenSearch:
@@ -408,6 +505,25 @@ class RAGChain:
             logger.error(f"RAG query failed: {str(e)}")
             raise
     
+    def _determine_llm_provider(self, model_name: str) -> str:
+        """
+        Determine which LLM provider to use based on model name
+        
+        Returns: 'openai', 'anthropic', or 'google'
+        """
+        model_lower = model_name.lower()
+        
+        # Anthropic models
+        if any(keyword in model_lower for keyword in ['claude', 'anthropic']):
+            return 'anthropic'
+        
+        # Google models
+        if any(keyword in model_lower for keyword in ['gemini', 'google', 'palm']):
+            return 'google'
+        
+        # Default to OpenAI for GPT models and unknowns
+        return 'openai'
+    
     def _generate_answer(
         self, 
         query: str, 
@@ -419,6 +535,7 @@ class RAGChain:
         model_to_use = llm_model or self.llm_model
         logger.info(f"Generating answer with model: {model_to_use}")
         
+        # Build context
         context_parts = []
         image_references = []
         
@@ -447,7 +564,7 @@ class RAGChain:
             # Add image information if present
             images = metadata.get('images', [])
             if images:
-                context_parts.append(f"\n📸 Related Images in Source {i}:\n")
+                context_parts.append(f"\n Related Images in Source {i}:\n")
                 for j, img in enumerate(images, 1):
                     img_info = f"  Image {j}: {img.get('filename', 'Unknown')}"
                     if img.get('alt_text'):
@@ -524,18 +641,40 @@ Question: {query}
 
 Please provide a detailed answer based on the context above in English."""
 
-        llm = ChatOpenAI(
-            model=model_to_use,
-            temperature=0.7,
-            openai_api_key=self.openai_api_key
-        )
-        
         messages = [
             SystemMessage(content=system_message),
             HumanMessage(content=user_message)
         ]
         
-        response = llm.invoke(messages)
+        # Determine which LLM to use and invoke
+        provider = self._determine_llm_provider(model_to_use)
+        logger.info(f"Using LLM provider: {provider}")
+        
+        if provider == 'anthropic':
+            # Use Anthropic with the specific model
+            llm = ChatAnthropic(
+                model=model_to_use,
+                temperature=0.7,
+                anthropic_api_key=self.anthropic_api_key
+            )
+            response = llm.invoke(messages)
+        elif provider == 'google':
+            # Use Google with the specific model
+            llm = ChatGoogleGenerativeAI(
+                model=model_to_use,
+                temperature=0.7,
+                google_api_key=self.google_api_key
+            )
+            response = llm.invoke(messages)
+        else:
+            # Use OpenAI with the specific model
+            llm = ChatOpenAI(
+                model=model_to_use,
+                temperature=0.7,
+                openai_api_key=self.openai_api_key
+            )
+            response = llm.invoke(messages)
+        
         logger.info(f"Generated answer ({len(response.content)} characters)")
         
         return response.content
