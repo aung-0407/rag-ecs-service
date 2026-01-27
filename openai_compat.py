@@ -128,6 +128,7 @@ async def list_models():
 
 @compat_app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
+    request_id = f"req-{int(time.time() * 1000)}"
     try:
         if not rag_chain_instance:
             raise HTTPException(status_code=503, detail="RAG system not initialized")
@@ -140,8 +141,9 @@ async def chat_completions(request: ChatCompletionRequest):
         query = user_messages[-1].content 
         
         logger.info(f"OpenAI-compat endpoint received query: {query}")
-        logger.info(f"Using model: {request.model}")
+        logger.info(f"[{request_id}] REQUEST |Using Model: {request.model} | Query: {query}")
         
+        start_time = time.time()
         # Execute RAG query with specified model (works with any provider)
         result = rag_chain_instance.query(
             query=query,
@@ -149,6 +151,7 @@ async def chat_completions(request: ChatCompletionRequest):
             search_type="hybrid",
             llm_model=request.model  
         )
+        duration = time.time() - start_time
         
         answer = result["answer"]
         sources = result["sources"]
@@ -186,11 +189,17 @@ async def chat_completions(request: ChatCompletionRequest):
             )
         )
         
-        logger.info("OpenAI-compat response generated successfully")
+        
+        source_files = [s.get("metadata", {}).get("filename", "Unknown") for s in sources[:3]]
+        logger.info(
+            f"[{request_id}]  RESPONSE | Duration: {duration:.2f}s | "
+            f"Sources: {len(sources)} | Files: {', '.join(source_files)}"
+        )
+        logger.info(f"[{request_id}]  ANSWER: {full_answer}")
         return response
         
     except Exception as e:
-        logger.error(f"Chat completion failed: {str(e)}")
+        logger.error(f"[{request_id}]  ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
