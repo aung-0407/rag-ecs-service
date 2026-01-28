@@ -55,16 +55,51 @@ EXECUTION_ROLE_ARN=$(aws iam get-role --role-name ${ECS_TASK_EXECUTION_ROLE_NAME
 echo "✓ Using execution role: ${EXECUTION_ROLE_ARN}"
 
 echo ""
-echo "Step 3: Get VPC subnets and existing security group"
+echo "Step 3: Get VPC PUBLIC subnets and existing security group"
 
-# Get subnets
+# ===== FIXED: Get only PUBLIC subnets =====
+echo "Looking for public subnets..."
+
+# Method 1: Try finding subnets with 'public' in the name
 SUBNETS=$(aws ec2 describe-subnets \
-    --filters "Name=vpc-id,Values=${VPC_ID}" \
+    --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:Name,Values=*public*" \
     --query 'Subnets[*].SubnetId' \
     --output text \
     --region ${AWS_REGION})
 
-echo "Found subnets: ${SUBNETS}"
+# Method 2: If no subnets found with 'public' in name, find subnets with Internet Gateway route
+if [ -z "$SUBNETS" ] || [ "$SUBNETS" == "None" ]; then
+    echo "No subnets with 'public' in name found, searching for subnets with IGW route..."
+    
+    # Get route tables that have an internet gateway
+    IGW_ROUTE_TABLES=$(aws ec2 describe-route-tables \
+        --filters "Name=vpc-id,Values=${VPC_ID}" \
+        --query 'RouteTables[?Routes[?GatewayId!=`local` && starts_with(GatewayId, `igw-`)]].RouteTableId' \
+        --output text \
+        --region ${AWS_REGION})
+    
+    if [ -n "$IGW_ROUTE_TABLES" ]; then
+        # Get subnets associated with these route tables
+        for RT_ID in $IGW_ROUTE_TABLES; do
+            RT_SUBNETS=$(aws ec2 describe-route-tables \
+                --route-table-ids ${RT_ID} \
+                --query 'RouteTables[0].Associations[?SubnetId!=`null`].SubnetId' \
+                --output text \
+                --region ${AWS_REGION})
+            SUBNETS="${SUBNETS} ${RT_SUBNETS}"
+        done
+        SUBNETS=$(echo $SUBNETS | xargs)  # Trim whitespace
+    fi
+fi
+
+if [ -z "$SUBNETS" ] || [ "$SUBNETS" == "None" ]; then
+    echo "ERROR: No public subnets found in VPC ${VPC_ID}!"
+    echo "Please ensure you have public subnets with an Internet Gateway."
+    exit 1
+fi
+
+echo "# Found public subnets: ${SUBNETS}"
+# ===== END FIX =====
 
 # Get existing ECS security group
 SG_ID=$(aws ec2 describe-security-groups \
@@ -163,6 +198,8 @@ echo "Step 5: Create or update ECS service"
 # Convert subnets to comma-separated list
 SUBNET_IDS=$(echo $SUBNETS | tr ' ' ',')
 
+echo "Using subnet IDs: ${SUBNET_IDS}"
+
 # Check if service exists
 SERVICE_EXISTS=$(aws ecs describe-services \
     --cluster ${CLUSTER_NAME} \
@@ -172,11 +209,12 @@ SERVICE_EXISTS=$(aws ecs describe-services \
     --output text 2>/dev/null)
 
 if [ "$SERVICE_EXISTS" == "ACTIVE" ]; then
-    echo "Updating existing service..."
+    echo "Updating existing service with new network configuration..."
     aws ecs update-service \
         --cluster ${CLUSTER_NAME} \
         --service ${SERVICE_NAME} \
         --task-definition ${TASK_FAMILY} \
+        --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}" \
         --force-new-deployment \
         --region ${AWS_REGION}
 else
@@ -226,7 +264,7 @@ if [ -n "$TASK_ARN" ] && [ "$TASK_ARN" != "None" ]; then
         
         echo ""
         echo "========================================="
-        echo "✅ Open WebUI is now running!"
+        echo "Open WebUI is now running!!!"
         echo "========================================="
         echo ""
         echo "Public IP: ${PUBLIC_IP}"
