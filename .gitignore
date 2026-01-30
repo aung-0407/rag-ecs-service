@@ -1,1 +1,8 @@
 .env
+open-webui-custom/node_modules/
+open-webui-custom/build/
+open-webui-custom/.svelte-kit/
+open-webui-custom/backend/data/
+open-webui-custom/backend/__pycache__/
+open-webui-custom/.next/
+open-webui-custom/dist/

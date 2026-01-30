@@ -170,6 +170,22 @@ cat > task-definition.json <<EOF
         {
           "name": "ENABLE_SIGNUP",
           "value": "true"
+        },
+        {
+          "name": "DEFAULT_USER_ROLE",
+          "value": "user"
+        },
+        {
+          "name": "WEBUI_NAME",
+          "value": "Toshiba RAG System"
+        },
+        {
+          "name": "ENABLE_COMMUNITY_SHARING",
+          "value": "false"
+        },
+        {
+          "name": "ENABLE_MESSAGE_RATING",
+          "value": "true"
         }
       ],
       "logConfiguration": {
