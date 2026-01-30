@@ -1,16 +1,12 @@
 #!/bin/bash
 
-# Open WebUI ECS Deployment Script (Using Existing Infrastructure)
-# This script uses your existing VPC, security groups, and IAM roles
-
-set -e  # Exit on error
+set -e
 
 echo "========================================="
-echo "Open WebUI ECS Deployment"
-echo "Using Your Existing Infrastructure"
+echo "Custom Open WebUI ECS Deployment"
 echo "========================================="
 
-# Load configuration from .env file
+# Load configuration
 if [ ! -f .env ]; then
     echo "ERROR: .env file not found!"
     exit 1
@@ -21,12 +17,9 @@ set -a
 source <(sed -e 's/\r$//' -e '/^#/d' -e '/^$/d' .env)
 set +a
 
-# Check if RAG_API_URL is set
+# Check RAG_API_URL
 if [ -z "$RAG_API_URL" ]; then
-    echo ""
     echo "ERROR: RAG_API_URL is not set in .env file!"
-    echo "Please deploy RAG API first and update .env"
-    echo ""
     exit 1
 fi
 
@@ -36,6 +29,7 @@ echo "RAG API URL: $RAG_API_URL"
 SERVICE_NAME="${WEBUI_SERVICE_NAME}"
 CLUSTER_NAME="${RAG_CLUSTER_NAME}"
 TASK_FAMILY="${WEBUI_TASK_FAMILY}"
+ECR_REPO_NAME="open-webui-custom"
 
 # Get AWS account ID
 if [ -z "$AWS_ACCOUNT_ID" ]; then
@@ -44,34 +38,50 @@ if [ -z "$AWS_ACCOUNT_ID" ]; then
 fi
 echo "AWS Account ID: $AWS_ACCOUNT_ID"
 
+ECR_REPO="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
+
 echo ""
-echo "Step 1: Ensure ECS cluster exists"
+echo "Step 1: Create ECR repository for custom Open WebUI"
+aws ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region ${AWS_REGION} 2>/dev/null || \
+    aws ecr create-repository --repository-name ${ECR_REPO_NAME} --region ${AWS_REGION}
+
+echo ""
+echo "Step 2: Build and push custom Docker image"
+echo "Logging in to ECR..."
+aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO}
+
+echo "Building custom Open WebUI image (this may take 5-10 minutes)..."
+cd open-webui-custom
+docker build -f Dockerfile.custom -t ${ECR_REPO_NAME}:latest .
+cd ..
+
+echo "Tagging image..."
+docker tag ${ECR_REPO_NAME}:latest ${ECR_REPO}:latest
+
+echo "Pushing to ECR..."
+docker push ${ECR_REPO}:latest
+
+echo ""
+echo "Step 3: Ensure ECS cluster exists"
 aws ecs describe-clusters --clusters ${CLUSTER_NAME} --region ${AWS_REGION} 2>/dev/null || \
     aws ecs create-cluster --cluster-name ${CLUSTER_NAME} --region ${AWS_REGION}
 
 echo ""
-echo "Step 2: Get existing IAM roles"
+echo "Step 4: Get existing IAM roles"
 EXECUTION_ROLE_ARN=$(aws iam get-role --role-name ${ECS_TASK_EXECUTION_ROLE_NAME} --query 'Role.Arn' --output text)
 echo "✓ Using execution role: ${EXECUTION_ROLE_ARN}"
 
 echo ""
-echo "Step 3: Get VPC PUBLIC subnets and existing security group"
+echo "Step 5: Get VPC PUBLIC subnets and security group"
 
-# ===== FIXED: Get only PUBLIC subnets =====
-echo "Looking for public subnets..."
-
-# Method 1: Try finding subnets with 'public' in the name
 SUBNETS=$(aws ec2 describe-subnets \
     --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:Name,Values=*public*" \
     --query 'Subnets[*].SubnetId' \
     --output text \
     --region ${AWS_REGION})
 
-# Method 2: If no subnets found with 'public' in name, find subnets with Internet Gateway route
 if [ -z "$SUBNETS" ] || [ "$SUBNETS" == "None" ]; then
     echo "No subnets with 'public' in name found, searching for subnets with IGW route..."
-    
-    # Get route tables that have an internet gateway
     IGW_ROUTE_TABLES=$(aws ec2 describe-route-tables \
         --filters "Name=vpc-id,Values=${VPC_ID}" \
         --query 'RouteTables[?Routes[?GatewayId!=`local` && starts_with(GatewayId, `igw-`)]].RouteTableId' \
@@ -79,7 +89,6 @@ if [ -z "$SUBNETS" ] || [ "$SUBNETS" == "None" ]; then
         --region ${AWS_REGION})
     
     if [ -n "$IGW_ROUTE_TABLES" ]; then
-        # Get subnets associated with these route tables
         for RT_ID in $IGW_ROUTE_TABLES; do
             RT_SUBNETS=$(aws ec2 describe-route-tables \
                 --route-table-ids ${RT_ID} \
@@ -88,20 +97,17 @@ if [ -z "$SUBNETS" ] || [ "$SUBNETS" == "None" ]; then
                 --region ${AWS_REGION})
             SUBNETS="${SUBNETS} ${RT_SUBNETS}"
         done
-        SUBNETS=$(echo $SUBNETS | xargs)  # Trim whitespace
+        SUBNETS=$(echo $SUBNETS | xargs)
     fi
 fi
 
 if [ -z "$SUBNETS" ] || [ "$SUBNETS" == "None" ]; then
     echo "ERROR: No public subnets found in VPC ${VPC_ID}!"
-    echo "Please ensure you have public subnets with an Internet Gateway."
     exit 1
 fi
 
-echo "# Found public subnets: ${SUBNETS}"
-# ===== END FIX =====
+echo "Found public subnets: ${SUBNETS}"
 
-# Get existing ECS security group
 SG_ID=$(aws ec2 describe-security-groups \
     --filters "Name=group-name,Values=${ECS_SECURITY_GROUP_NAME}" "Name=vpc-id,Values=${VPC_ID}" \
     --query 'SecurityGroups[0].GroupId' \
@@ -115,7 +121,6 @@ fi
 
 echo "✓ Using existing security group: ${SG_ID} (${ECS_SECURITY_GROUP_NAME})"
 
-# Check if port 8080 is allowed
 PORT_8080_ALLOWED=$(aws ec2 describe-security-groups \
     --group-ids ${SG_ID} \
     --query "SecurityGroups[0].IpPermissions[?FromPort==\`8080\` && ToPort==\`8080\`] | length(@)" \
@@ -133,20 +138,20 @@ if [ "$PORT_8080_ALLOWED" == "0" ]; then
 fi
 
 echo ""
-echo "Step 4: Register ECS task definition"
+echo "Step 6: Register ECS task definition"
 
 cat > task-definition.json <<EOF
 {
   "family": "${TASK_FAMILY}",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
-  "cpu": "${CPU}",
-  "memory": "${MEMORY}",
+  "cpu": "1024",
+  "memory": "2048",
   "executionRoleArn": "${EXECUTION_ROLE_ARN}",
   "containerDefinitions": [
     {
       "name": "${SERVICE_NAME}",
-      "image": "ghcr.io/open-webui/open-webui:main",
+      "image": "${ECR_REPO}:latest",
       "essential": true,
       "portMappings": [
         {
@@ -172,20 +177,12 @@ cat > task-definition.json <<EOF
           "value": "true"
         },
         {
-          "name": "DEFAULT_USER_ROLE",
-          "value": "user"
-        },
-        {
           "name": "WEBUI_NAME",
           "value": "Toshiba RAG System"
         },
         {
-          "name": "ENABLE_COMMUNITY_SHARING",
-          "value": "false"
-        },
-        {
-          "name": "ENABLE_MESSAGE_RATING",
-          "value": "true"
+          "name": "DEFAULT_USER_ROLE",
+          "value": "user"
         }
       ],
       "logConfiguration": {
@@ -209,14 +206,10 @@ aws ecs register-task-definition \
 rm task-definition.json
 
 echo ""
-echo "Step 5: Create or update ECS service"
+echo "Step 7: Create or update ECS service"
 
-# Convert subnets to comma-separated list
 SUBNET_IDS=$(echo $SUBNETS | tr ' ' ',')
 
-echo "Using subnet IDs: ${SUBNET_IDS}"
-
-# Check if service exists
 SERVICE_EXISTS=$(aws ecs describe-services \
     --cluster ${CLUSTER_NAME} \
     --services ${SERVICE_NAME} \
@@ -225,12 +218,11 @@ SERVICE_EXISTS=$(aws ecs describe-services \
     --output text 2>/dev/null)
 
 if [ "$SERVICE_EXISTS" == "ACTIVE" ]; then
-    echo "Updating existing service with new network configuration..."
+    echo "Updating existing service with custom image..."
     aws ecs update-service \
         --cluster ${CLUSTER_NAME} \
         --service ${SERVICE_NAME} \
         --task-definition ${TASK_FAMILY} \
-        --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}" \
         --force-new-deployment \
         --region ${AWS_REGION}
 else
@@ -247,13 +239,12 @@ fi
 
 echo ""
 echo "========================================="
-echo "Deployment Complete!"
+echo "Custom Deployment Complete!"
 echo "========================================="
 echo ""
 echo "Waiting for tasks to start (this may take 2-3 minutes)..."
 sleep 60
 
-# Get task ARN
 TASK_ARN=$(aws ecs list-tasks \
     --cluster ${CLUSTER_NAME} \
     --service-name ${SERVICE_NAME} \
@@ -262,7 +253,6 @@ TASK_ARN=$(aws ecs list-tasks \
     --output text)
 
 if [ -n "$TASK_ARN" ] && [ "$TASK_ARN" != "None" ]; then
-    # Get ENI ID
     ENI_ID=$(aws ecs describe-tasks \
         --cluster ${CLUSTER_NAME} \
         --tasks ${TASK_ARN} \
@@ -271,7 +261,6 @@ if [ -n "$TASK_ARN" ] && [ "$TASK_ARN" != "None" ]; then
         --output text)
     
     if [ -n "$ENI_ID" ]; then
-        # Get public IP
         PUBLIC_IP=$(aws ec2 describe-network-interfaces \
             --network-interface-ids ${ENI_ID} \
             --region ${AWS_REGION} \
@@ -280,17 +269,11 @@ if [ -n "$TASK_ARN" ] && [ "$TASK_ARN" != "None" ]; then
         
         echo ""
         echo "========================================="
-        echo "Open WebUI is now running!!!"
+        echo "Custom Open WebUI is now running!"
         echo "========================================="
         echo ""
         echo "Public IP: ${PUBLIC_IP}"
         echo "Web Interface: http://${PUBLIC_IP}:8080"
-        echo ""
-        echo "Next steps:"
-        echo "1. Open http://${PUBLIC_IP}:8080 in your browser"
-        echo "2. Sign up for an account (first user becomes admin)"
-        echo "3. Select 'rag-model' from the model dropdown"
-        echo "4. Start chatting with your documents!"
         echo ""
         echo "Connected to RAG API: ${RAG_API_URL}"
         echo ""
